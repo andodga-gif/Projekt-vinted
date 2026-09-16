@@ -18,7 +18,7 @@ st.markdown(
 
 @st.cache_resource
 def zaladuj_model():
-    return new_session("rmbg-2.0")
+    return new_session("bria-rmbg")
 
 
 sesja_ai = zaladuj_model()
@@ -145,24 +145,53 @@ def generuj_drewno(w, h, seed=None):
 # 2. WYGŁADZANIE KRAWĘDZI (tylko maska alfa – nadruki i tekstura pozostają nietknięte)
 # ----------------------------------------------------------------------------------
 
-def wygladz_krawedzie(rgba, sila=2):
+def wygladz_krawedzie(rgba, sila=1.0):
     """Wygładza poszarpane / pofalowane brzegi wycięcia, operując WYŁĄCZNIE na
     kanale alfa (masce). Piksele RGB (nadruk, szwy, logo) nie są w ogóle
-    modyfikowane – zmienia się jedynie kontur przezroczystości."""
+    modyfikowane – zmienia się jedynie kontur przezroczystości.
+    `sila` to mnożnik (1.0 = domyślnie), sterowany suwakiem w UI.
+
+    Wydajność: duże filtry rangowe (Max/MinFilter) na zdjęciach 10+ Mpx są
+    bardzo kosztowne. Dlatego operacje morfologiczne robimy na pomniejszonej
+    kopii maski (max. 700 px krótszego boku) i skalujemy wynik z powrotem —
+    efekt wygładzenia jest ten sam, ale dziesiątki razy szybszy."""
+    w, h = rgba.size
+    baza = min(w, h)
     r, g, b, a = rgba.split()
 
+    robocza_baza = min(baza, 700)
+    skala = robocza_baza / baza
+    if skala < 1.0:
+        robocze_wh = (max(1, round(w * skala)), max(1, round(h * skala)))
+        a_robocza = a.resize(robocze_wh, Image.BILINEAR)
+    else:
+        a_robocza = a
+
+    kernel = max(3, int(round(robocza_baza / 200 * sila)))
+    if kernel % 2 == 0:
+        kernel += 1
+    promien_rozmycia = max(1.0, robocza_baza * 0.0025 * sila)
+
     # 1) zamknięcie morfologiczne (dylatacja + erozja) usuwa drobne "ząbki"
-    a = a.filter(ImageFilter.MaxFilter(3))
-    a = a.filter(ImageFilter.MinFilter(3))
+    a_robocza = a_robocza.filter(ImageFilter.MaxFilter(kernel))
+    a_robocza = a_robocza.filter(ImageFilter.MinFilter(kernel))
     # 2) otwarcie morfologiczne usuwa drobne wypustki/pofalowania
-    a = a.filter(ImageFilter.MinFilter(3))
-    a = a.filter(ImageFilter.MaxFilter(3))
-    # 3) lekkie rozmycie + ponowny próg, żeby kontur był płynny, ale ostry
-    a_rozmyte = a.filter(ImageFilter.GaussianBlur(sila))
-    a_np = np.asarray(a_rozmyte, dtype=np.float64)
-    # delikatne "wyprostowanie" progu (S-curve) – zachowuje miękkie antyaliasowanie
-    a_np = 255 * (1 / (1 + np.exp(-0.06 * (a_np - 128))))
-    a_final = Image.fromarray(np.clip(a_np, 0, 255).astype(np.uint8), mode="L")
+    a_robocza = a_robocza.filter(ImageFilter.MinFilter(kernel))
+    a_robocza = a_robocza.filter(ImageFilter.MaxFilter(kernel))
+    # 3) lekkie rozmycie konturu
+    a_robocza = a_robocza.filter(ImageFilter.GaussianBlur(promien_rozmycia))
+
+    if skala < 1.0:
+        a_final_img = a_robocza.resize((w, h), Image.LANCZOS)
+    else:
+        a_final_img = a_robocza
+
+    a_np = np.asarray(a_final_img, dtype=np.float64)
+    # delikatne podbicie kontrastu maski (NIE twardy próg) – kontur staje się
+    # bardziej zdecydowany, ale naturalnie miękkie krawędzie (np. strzępiące
+    # się nitki) nie zamieniają się w twardo wycięty kontur
+    a_np = np.clip(128 + (a_np - 128) * 1.15, 0, 255)
+    a_final = Image.fromarray(a_np.astype(np.uint8), mode="L")
 
     return Image.merge("RGBA", (r, g, b, a_final))
 
@@ -198,27 +227,32 @@ def wysrodkuj(rgba, margines_proc=0.06):
 
 def generuj_cienie(rgba):
     w, h = rgba.size
+    baza = min(w, h)  # punkt odniesienia do skalowania - działa dla każdej rozdzielczości
     maska = rgba.split()[-1]
 
     warstwa_cieni = Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
-    # --- cień kontaktowy (ostry, ciemny, blisko krawędzi) ---
+    # --- cień kontaktowy (ostry, ciemny, tuż pod ubraniem) ---
+    promien_kontakt = max(3, baza * 0.010)
+    offset_kontakt = (max(1, round(baza * 0.006)), max(1, round(baza * 0.010)))
     kontakt = Image.new("RGBA", (w, h), (10, 10, 12, 255))
     kontakt = Image.composite(kontakt, Image.new("RGBA", (w, h), (0, 0, 0, 0)), maska)
-    kontakt = kontakt.filter(ImageFilter.GaussianBlur(radius=5))
+    kontakt = kontakt.filter(ImageFilter.GaussianBlur(radius=promien_kontakt))
     alfa_kontakt = kontakt.split()[-1].point(lambda p: int(p * 0.55))
     kontakt.putalpha(alfa_kontakt)
-    warstwa_cieni.paste(kontakt, (4, 6), kontakt)
+    warstwa_cieni.paste(kontakt, offset_kontakt, kontakt)
 
     # --- cień otoczenia (miękki, szeroki, dalej od ubrania) ---
+    promien_otoczenie = max(10, baza * 0.045)
+    offset_otoczenie = (max(2, round(baza * 0.018)), max(3, round(baza * 0.032)))
     otoczenie = Image.new("RGBA", (w, h), (20, 20, 26, 255))
     otoczenie = Image.composite(otoczenie, Image.new("RGBA", (w, h), (0, 0, 0, 0)), maska)
-    otoczenie = otoczenie.filter(ImageFilter.GaussianBlur(radius=28))
+    otoczenie = otoczenie.filter(ImageFilter.GaussianBlur(radius=promien_otoczenie))
     alfa_otoczenie = otoczenie.split()[-1].point(lambda p: int(p * 0.32))
     otoczenie.putalpha(alfa_otoczenie)
 
     finalne = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    finalne.paste(otoczenie, (12, 20), otoczenie)
+    finalne.paste(otoczenie, offset_otoczenie, otoczenie)
     finalne = Image.alpha_composite(finalne, warstwa_cieni)
     return finalne
 
@@ -228,6 +262,10 @@ def generuj_cienie(rgba):
 # ----------------------------------------------------------------------------------
 
 typ_tla = st.radio("Wybierz styl tła:", ("Jasny Beton", "Ciepłe Drewno"), horizontal=True)
+sila_wygladzania = st.slider(
+    "Siła wygładzania krawędzi", min_value=0.5, max_value=3.0, value=1.0, step=0.25,
+    help="Wyższa wartość mocniej prostuje pofalowane brzegi ubrania. Zbyt wysoka może zaokrąglić naturalne detale kroju (np. rozcięcia, kaptur)."
+)
 plik_foto = st.file_uploader("Wybierz zdjęcie z galerii lub zrób aparatem", type=["jpg", "jpeg", "png"])
 
 if plik_foto is not None:
@@ -242,7 +280,7 @@ if plik_foto is not None:
             ubranie_czyste = remove(img, session=sesja_ai)
 
             # 2. Wygładzenie tylko konturu (nadruk/logo nienaruszone)
-            ubranie_czyste = wygladz_krawedzie(ubranie_czyste, sila=2)
+            ubranie_czyste = wygladz_krawedzie(ubranie_czyste, sila=sila_wygladzania)
 
             # 3. Automatyczne centrowanie
             ubranie_czyste = wysrodkuj(ubranie_czyste)
@@ -284,3 +322,4 @@ if plik_foto is not None:
                 mime="image/jpeg",
                 use_container_width=True,
             )
+
