@@ -1,3 +1,4 @@
+
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps, ImageDraw
@@ -37,14 +38,14 @@ def _szum_wielooktawowy(w, h, skale=(4, 8, 16, 32, 64, 128), zanik=0.55, seed=No
     else:
         rng = np.random.default_rng()
 
-    wynik = np.zeros((h, w), dtype=np.float64)
+    wynik = np.zeros((h, w), dtype=np.float32)
     amplituda = 1.0
     suma_amplitud = 0.0
     for skala in skale:
         mw, mh = max(2, w // skala), max(2, h // skala)
         mala = rng.random((mh, mw)).astype(np.float32)
         warstwa = Image.fromarray((mala * 255).astype(np.uint8)).resize((w, h), Image.BICUBIC)
-        wynik += amplituda * (np.asarray(warstwa, dtype=np.float64) / 255.0)
+        wynik += amplituda * (np.asarray(warstwa, dtype=np.float32) / 255.0)
         suma_amplitud += amplituda
         amplituda *= zanik
     wynik /= suma_amplitud
@@ -59,18 +60,18 @@ def generuj_beton(w, h, seed=None):
     baza = np.clip((baza - 0.5) * 0.9 + 0.5, 0, 1)
 
     # bazowy jasny odcień betonu z lekkim ciepłym/chłodnym driftem
-    kolor_bazowy = np.array([214, 213, 210], dtype=np.float64)
-    obraz = np.zeros((h, w, 3), dtype=np.float64)
+    kolor_bazowy = np.array([214, 213, 210], dtype=np.float32)
+    obraz = np.zeros((h, w, 3), dtype=np.float32)
     for i in range(3):
         obraz[:, :, i] = kolor_bazowy[i] + (baza - 0.5) * 34.0
 
     # drobny szum ziarnisty (mikroteksturę betonu)
-    ziarno = (np.random.default_rng(seed).normal(0, 4.5, (h, w, 1)))
+    ziarno = (np.random.default_rng(seed).normal(0, 4.5, (h, w, 1))).astype(np.float32)
     obraz += ziarno
 
     # kilka subtelnych "rys" / spękań jako cienkie, losowe linie
     rng = np.random.default_rng(seed)
-    warstwa_rys = np.zeros((h, w), dtype=np.float64)
+    warstwa_rys = np.zeros((h, w), dtype=np.float32)
     for _ in range(rng.integers(3, 7)):
         x0, y0 = rng.integers(0, w), rng.integers(0, h)
         dlugosc = rng.integers(int(w * 0.15), int(w * 0.5))
@@ -80,7 +81,7 @@ def generuj_beton(w, h, seed=None):
         rysa_img = Image.new("L", (w, h), 0)
         d = ImageDraw.Draw(rysa_img)
         d.line([(x0, y0), (x1, y1)], fill=255, width=1)
-        warstwa_rys += np.asarray(rysa_img.filter(ImageFilter.GaussianBlur(1.2)), dtype=np.float64) / 255.0
+        warstwa_rys += np.asarray(rysa_img.filter(ImageFilter.GaussianBlur(1.2)), dtype=np.float32) / 255.0
     for i in range(3):
         obraz[:, :, i] -= warstwa_rys * 6.0
 
@@ -116,8 +117,8 @@ def generuj_drewno(w, h, seed=None):
     odcienie = rng.uniform(-14, 14, size=int(numer_deski.max()) + 2)
     roznica_deski = odcienie[numer_deski.astype(int)]
 
-    baza = np.array([176, 140, 104], dtype=np.float64)  # ciepły jasny dąb
-    obraz = np.zeros((h, w, 3), dtype=np.float64)
+    baza = np.array([176, 140, 104], dtype=np.float32)  # ciepły jasny dąb
+    obraz = np.zeros((h, w, 3), dtype=np.float32)
     for i in range(3):
         obraz[:, :, i] = baza[i] + roznica_deski + (slouje - 0.5) * 22.0
 
@@ -127,7 +128,7 @@ def generuj_drewno(w, h, seed=None):
     for i in range(3):
         obraz[:, :, i][szczelina] -= 30
 
-    ziarno = rng.normal(0, 3.5, (h, w, 1))
+    ziarno = rng.normal(0, 3.5, (h, w, 1)).astype(np.float32)
     obraz += ziarno
 
     xg, yg = np.meshgrid(np.linspace(-1, 1, w), np.linspace(-1, 1, h))
@@ -186,7 +187,7 @@ def wygladz_krawedzie(rgba, sila=1.0):
     else:
         a_final_img = a_robocza
 
-    a_np = np.asarray(a_final_img, dtype=np.float64)
+    a_np = np.asarray(a_final_img, dtype=np.float32)
     # delikatne podbicie kontrastu maski (NIE twardy próg) – kontur staje się
     # bardziej zdecydowany, ale naturalnie miękkie krawędzie (np. strzępiące
     # się nitki) nie zamieniają się w twardo wycięty kontur
@@ -271,9 +272,21 @@ plik_foto = st.file_uploader("Wybierz zdjęcie z galerii lub zrób aparatem", ty
 if plik_foto is not None:
     img = Image.open(plik_foto).convert("RGBA")
     img = ImageOps.exif_transpose(img)
-    st.image(img, caption="Oryginalne zdjęcie", use_container_width=True)
 
-    if st.button("✨ GENERUJ PRODUKTOWE FOTO ✨", type="primary", use_container_width=True):
+    # Ograniczenie rozdzielczości roboczej: zdjęcia z telefonu (12+ Mpx) zużywają
+    # dużo RAM-u na darmowym, ograniczonym serwerze (model AI sam waży ~1 GB).
+    # 2000 px dłuższego boku to więcej niż potrzeba do dobrej jakości na Vinted/
+    # e-commerce (typowe wyświetlanie i tak skaluje w dół), a drastycznie
+    # zmniejsza zużycie pamięci i czas przetwarzania.
+    MAX_BOK = 2000
+    if max(img.size) > MAX_BOK:
+        skala = MAX_BOK / max(img.size)
+        nowy_rozmiar = (round(img.width * skala), round(img.height * skala))
+        img = img.resize(nowy_rozmiar, Image.LANCZOS)
+
+    st.image(img, caption="Oryginalne zdjęcie", width='stretch')
+
+    if st.button("✨ GENERUJ PRODUKTOWE FOTO ✨", type="primary", width='stretch'):
         with st.spinner("Przetwarzanie AI... Zachowuję oryginalne detale i logo."):
 
             # 1. Wycinanie starego tła modelem rmbg-2.0
@@ -309,7 +322,7 @@ if plik_foto is not None:
             gotowy_obraz = foto_koncowe.convert("RGB")
 
             st.success("Gotowe!")
-            st.image(gotowy_obraz, caption="Wynik końcowy", use_container_width=True)
+            st.image(gotowy_obraz, caption="Wynik końcowy", width='stretch')
 
             bufor = io.BytesIO()
             gotowy_obraz.save(bufor, format="JPEG", quality=100)
@@ -320,6 +333,6 @@ if plik_foto is not None:
                 data=bajt_obrazu,
                 file_name="vinted_studio.jpg",
                 mime="image/jpeg",
-                use_container_width=True,
+                width='stretch',
             )
 
