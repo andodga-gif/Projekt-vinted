@@ -1,4 +1,3 @@
-
 import streamlit as st
 from rembg import remove, new_session
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps, ImageDraw
@@ -19,7 +18,10 @@ st.markdown(
 
 @st.cache_resource
 def zaladuj_model():
-    return new_session("bria-rmbg")
+    # isnet-general-use (~179 MB) zamiast bria-rmbg / RMBG-2.0 (~1,02 GB) —
+    # ten drugi sam w sobie przekraczał limit RAM na darmowym Streamlit Cloud
+    # (kontener padał już przy wczytywaniu modelu, zanim zdjęcie trafiało do kodu).
+    return new_session("isnet-general-use")
 
 
 sesja_ai = zaladuj_model()
@@ -335,4 +337,3 @@ if plik_foto is not None:
                 mime="image/jpeg",
                 width='stretch',
             )
-
